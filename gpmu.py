@@ -20,6 +20,10 @@ class Addr(Operand):
     offset: int = 0
 
 @dataclass
+class Label(Operand):
+    id: str
+
+@dataclass
 class Instruction:
     opcode: str
     qualifiers: list[str]
@@ -32,8 +36,9 @@ class Register:
         sp = next((i for i, x in enumerate(type_str) if str.isdigit(x)), None)
         t = type_str if not sp else type_str[:sp]
         self.signed = t == "s"
+        self.pred = type_str == "pred"
         self.fp = t == "f"
-        self.bits = 32 if not sp else int(type_str[sp:])
+        self.bits = 1 if not sp else int(type_str[sp:])
         self.value: int = 0
 
 @dataclass
@@ -47,6 +52,15 @@ class Kernel:
         lines = [line.strip() for line in body.split(';')]
         instrs = [l for l in lines if len(l) > 0 and l[0] != '.']
         dirs = [l for l in lines if len(l) > 0 and l[0] == '.']
+
+        # 0. Strip and register labels
+        label_map = {}
+        for i, line in enumerate(instrs):
+            line = line.strip().split(':')
+            if len(line) == 1: continue
+            label, rest = line
+            label_map[label[1:]] = i
+            instrs[i]=rest
         
         # 1. Parse kernel parameters
         params = {}
@@ -61,24 +75,26 @@ class Kernel:
             symbols = d.strip().split()
             dcode = symbols[0]
             if dcode == ".reg":
-                decl = re.search(r'%([^<]*)<([^>])>', symbols[2])
+                decl = re.search(r'%([^<]*)<([^>]+)>', symbols[2])
                 if not decl: continue
                 prefix, virtual = decl.group(1), decl.group(2)
                 for i in range(int(virtual)): registers[f"{prefix}{i}"]=Register(symbols[1])
 
         # 3. Parse instructions
-        pattern = re.compile(r'(?:(@\S+)\s+)?(\S+)\s*(.*)')
         instructions = []
         def parse_operand(s):
             if s.startswith('['): return Addr(s[1:-1])
-            if s.startswith('%'): return Reg(s[1:])
-            if s.startswith('0f'): return Imm(struct.unpack('f', bytes.fromhex(s[2:]))[0])
+            elif s.startswith('%'): return Reg(s[1:])
+            elif s.startswith('0f'): return Imm(struct.unpack('f', bytes.fromhex(s[2:]))[0])
+            elif s.startswith('$'): return Label(s[1:])
             return Imm(int(s))
 
+        pattern = re.compile(r'(?:(@\S+)\s+)?(\S+)\s*(.*)')
         for i in instrs:
             m = pattern.match(i)
             if not m: continue
             pred, op_str, operand_str = m.group(1), m.group(2), m.group(3)
+            #print(pred, op_str, operand_str)
             parts = op_str.split('.')
             opcode, quals = parts[0], parts[1:]
             operands = [parse_operand(o.strip()) for o in operand_str.split(',') if o.strip()]
@@ -101,15 +117,8 @@ def load_kernels(src) -> dict[str, Kernel]:
     kernels = {}
     for (name, params, body) in kstubs:
         kernel = Kernel.decode(params, body)
-        print("Kernel:", name)
-        for pname, reg in kernel.params.items():
-            print("\tParameter:", pname, reg.signed, reg.fp, reg.bits)
-        for rname, reg in kernel.regfile.items():
-            print("\tRegister:", rname)
-        for instr in kernel.ops:
-            print('\t', instr)
+        print(f"Kernel: {name}\n\t# params={len(kernel.params)}\n\t# registers={len(kernel.regfile)}\n\t# instructions={len(kernel.ops)}")
         kernels[name]=kernel
     return kernels
 
-kernels = load_kernels(open("test/kernel.ptx", "r").read())
-print("Available kernels:", kernels.keys())
+kernels = load_kernels(open("test/gemm.ptx", "r").read())
