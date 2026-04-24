@@ -111,5 +111,5 @@ def load_kernels(src) -> dict[str, Kernel]:
         kernels[name]=kernel
     return kernels
 
-kernels = load_kernels(open("kernel.ptx", "r").read())
+kernels = load_kernels(open("test/kernel.ptx", "r").read())
 print("Available kernels:", kernels.keys())
