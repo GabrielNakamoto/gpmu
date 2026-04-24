@@ -1,0 +1,3 @@
+# gpmu
+
+goal: Semi-cycle accurate custom GPU emulator, loads .ptx kernels and runs on custom SM style arch
