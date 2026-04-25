@@ -11,7 +11,16 @@ class Register:
         self.pred = type_str == "pred"
         self.fp = t == "f"
         self.bits = 1 if not sp else int(type_str[sp:])
-        self.value: int = 0
+        self.buffer = bytes()
+
+    def set(self, value):
+        if self.fp: self.buffer = struct.pack("f", value)
+        self.buffer = struct.pack("i" if self.signed else "I", self.buffer)
+
+    @property
+    def value(self) -> int | float:
+        if self.fp: return struct.unpack("f", self.buffer)[0]
+        return struct.unpack("i" if self.signed else "I", self.buffer)[0]
 
 @dataclass
 class Operand:
