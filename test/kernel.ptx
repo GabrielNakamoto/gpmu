@@ -6,8 +6,21 @@
 // Based on NVVM 7.0.1
 //
 
+/*
+
+
+Test
+Multiline
+comment
+
+*/
+
 .version 9.2
 .target sm_75
+
+/*
+Another
+*/
 .address_size 64
 
 	// .globl	_Z12vector_mulpiPfS_
