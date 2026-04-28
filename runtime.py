@@ -1,7 +1,6 @@
 from parser import Kernel, Instruction
-import struct
+import re, struct, math, itertools
 from collections import Counter
-import math
 from dataclasses import dataclass
 
 @dataclass
@@ -18,7 +17,7 @@ class WarpState:
     global_mem: bytearray
     shared_mem: bytearray
     const_mem: bytearray
-    regs: list[dict[str, bytes]]
+    regs: list[dict[str, tuple[str, bytes]]]
     sregs: list[dict[str, int]]
 
 arith_ops = {
@@ -33,6 +32,15 @@ arith_ops = {
     "min" : min,
     "max" : max,
 }
+
+ptx_to_struct_fmt = {
+    "pred" : "?",
+    "s8" : "b", "s16" : "h", "s32" : "i", "s64" : "q",
+    "u8" : "B", "u16" : "H", "u32" : "I", "u64" : "Q",
+    "f16" : "e", "f32" : "f", "f64" : "d",
+}
+
+def ptx_width(fmt): return int(re.search(r'\d+', fmt).group()) // 8
 
 class Warp:
     def __init__(self, wid: int, gid: tuple[int, int, int], grid: Dim3, cta: Dim3, state: WarpState, stream: list[Instruction]):
@@ -57,12 +65,38 @@ class Warp:
         self.pc = [0 for _ in range(32)]
         self.alive = [True for _ in range(32)]
 
-    def assign_reg(self, lane, fmt, key, value):
-        print(fmt)
-        self.state.regs[lane][key]=struct.pack(fmt, value)
-    def get_value(self, lane, opr):
-        if opr[0] == "reg": return self.state.regs[lane][opr[1]]
-        else: return opr[1]
+    def assign_reg(self, lane, op_fmt, key, value):
+        decl_fmt = self.state.regs[lane][key][0]
+        width = ptx_width(decl_fmt)
+        if isinstance(value, (bytes, bytearray)):
+            raw = bytes(value).ljust(width, b"\x00")[:width]
+        elif decl_fmt.startswith("f") or op_fmt.startswith("f"):
+            raw = struct.pack("<" + ptx_to_struct_fmt[op_fmt], float(value))
+            raw = raw.ljust(width, b"\x00")[:width]
+        else:
+            mask = (1 << (width * 8)) - 1
+            raw = (int(value) & mask).to_bytes(width, "little", signed=False)
+        self.state.regs[lane][key]=(decl_fmt, raw)
+
+    def get_value(self, lane, op_fmt, opr):
+        if opr[0] != "reg": return opr[1]
+        raw = self.state.regs[lane][opr[1]][1]
+        buf = raw[:ptx_width(op_fmt)]
+        if op_fmt.startswith("f"):
+            return struct.unpack("<" + ptx_to_struct_fmt[op_fmt], buf)[0]
+        return int.from_bytes(buf, "little", signed=op_fmt.startswith("s"))
+
+    def resolve_address(self, addr: str):
+        base, offset = 0, 0
+        if "+" in addr:
+            addr, n = addr.split("+")
+            offset = int(n)
+        if addr.startswith("%"):
+            pass
+        return base + offset
+
+    def get_from_address(self, lane, space, op_fmt, addr):
+        pass
 
     def __call__(self):
         active = [l for l in range(32) if self.alive[l]]
@@ -72,12 +106,14 @@ class Warp:
 
         for l in issue_mask:
             if op.opcode in arith_ops:
-                fmt = op.qualifiers[0]
-                d = op.operands[0]
-                args = op.operands[1:]
-
-                self.assign_reg(l, fmt, d[1], arith_ops[op.opcode](*[self.get_value(l, a) for a in args]))
-                print(op.opcode, d, args)
+                d, fmt, args = op.operands[0], op.qualifiers[-1], op.operands[1:]
+                self.assign_reg(l, fmt, d[1], arith_ops[op.opcode](*[self.get_value(l, fmt, a) for a in args]))
+            elif op.opcode == "ld":
+                d, addr = op.operands
+                space, fmt = op.qualifiers[0], op.qualifiers[-1]
+                print(op.opcode, addr)
+            elif op.opcode == "st":
+                pass
         for l in issue_mask: self.pc[l] += 1
 
 class WarpScheduler:
@@ -94,24 +130,24 @@ class SIMTCore:
 
         global_mem, shared_mem, const_mem = bytearray(48000), bytearray(48000), bytearray(48000)
         regs = {}
-        for (_, prefix, n) in kernel.regs:
-            for i in range(n): regs[f"{prefix}{i}"]=0
+        for (fmt, prefix, n) in kernel.regs:
+            for i in range(n):
+                raw=struct.pack(ptx_to_struct_fmt[fmt], 0) if not fmt.startswith("b") else int(0).to_bytes(ptx_width(fmt), "little", signed=False)
+                regs[f"{prefix}{i}"]=(fmt, raw)
         regs = [regs.copy() for _ in range(32)]
 
-        for gz in range(grid.z):
-            for gy in range(grid.y):
-                for gx in range(grid.x):
-                    warps = [
-                        Warp(wid, (gx, gy, gz), grid, cta,
-                             WarpState(global_mem, shared_mem, const_mem, regs.copy(), [dict() for _ in range(32)]),
-                             kernel.instructions)
-                        for wid in range(warps_per_cta)]
-                    schedulers = [WarpScheduler(warps[i::4]) for i in range(4)]
+        for (gz, gy, gx) in itertools.product(range(grid.z), range(grid.y), range(grid.x)):
+            warps = [
+                Warp(wid, (gx, gy, gz), grid, cta,
+                     WarpState(global_mem, shared_mem, const_mem, regs.copy(), [dict() for _ in range(32)]),
+                     kernel.instructions)
+                for wid in range(warps_per_cta)]
+            schedulers = [WarpScheduler(warps[i::4]) for i in range(4)]
 
-                    while True:
-                        warps_active = False
-                        for ws in schedulers:
-                            if warp := next(ws):
-                                warps_active = True
-                                warp()
-                        if not warps_active: break
+            while True:
+                warps_active = False
+                for ws in schedulers:
+                    if warp := next(ws):
+                        warps_active = True
+                        warp()
+                if not warps_active: break
