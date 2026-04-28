@@ -42,7 +42,6 @@ immediate: /\-?\d+/ | /0f[0-9a-fA-F]+/
 %ignore WS
 """
 
-
 @dataclass
 class Instruction:
     opcode: str
@@ -56,24 +55,29 @@ class Kernel:
     params: list[str]
     regs: list[tuple]
     instructions: list[Instruction]
-    labels: dict[str, int]
 
 @v_args(inline=True)
 class IRTransformer(Transformer):
-    def register_operand(self, t):  return ("reg", str(t))
-    def address_operand(self, t):   return ("addr", str(t).strip())
-    def label_operand(self, t):     return ("label", str(t))
-
-    def opcode(self, t):            return str(t)
-    def qualifier(self, t):         return str(t)
-    def predicate(self, t):         return f"%p{t}"
-    def kernel_name(self, t):       return str(t).rstrip("(")
-    def param(self, fmt, name):     return (str(fmt).lstrip("."), str(name))
+    def register_operand(self, t):      return ("reg", str(t))
+    def address_operand(self, t):       return ("addr", str(t).strip())
+    def label_operand(self, t):         return ("label", str(t))
+    def opcode(self, t):                return str(t)
+    def qualifier(self, t):             return str(t)
+    def predicate(self, t):             return f"%p{t}"
+    def kernel_name(self, t):           return str(t).rstrip("(")
+    def param(self, fmt, name):         return (str(fmt).lstrip("."), str(name))
     def variable(self, _, fmt, pfx, n): return (str(fmt).strip(), str(pfx), int(n))
-    def kernel_directive(self, _): return Discard
-    def directive(self, *_): return Discard
-    def kernel_body(self, *args): return args
-    def params(self, *args): return args
+    def kernel_directive(self, _):      return Discard
+    def directive(self, *_):            return Discard
+    def kernel_body(self, *args):
+        if isinstance(args, tuple) and len(args) == 1: return args[0]
+        return args
+    def params(self, *args):            return [*args]
+    def operand(self, opr):             return opr
+    def label(self, name): return ("label", str(name))
+    def immediate(self, t):
+        if len(t) > 1 and t[1].lower() == 'f': return ("float", float(t[2:]))
+        else: return ("int", int(t))
 
     @v_args(inline=False)
     def instruction(self, c):
@@ -83,7 +87,6 @@ class IRTransformer(Transformer):
         operands = [x for x in c if not isinstance(x, str)]
         return Instruction(opcode, quals, operands, pred)
 
-    def label(self, name): return ("label", str(name))
     @v_args(inline=False)
     def kernel(self, c):
         name, params, *raw = c
@@ -95,22 +98,17 @@ class IRTransformer(Transformer):
             if isinstance(item, tuple) and len(item) == 0: continue
             if isinstance(item, tuple) and item[0] == "label": labels[item[1]]=len(instructions)
             elif isinstance(item, Instruction): instructions.append(item)
-        return Kernel(name, params, regs, instructions, labels)
+        # resolve label operands
+        for op in instructions:
+            for i, opr in enumerate(op.operands):
+                if opr[0] == "label": op.operands[i] = ("pc", labels[opr[1]])
+        return Kernel(name, params, regs, instructions)
+
     @v_args(inline=False)
     def statement(self, c): return c[0] if c else Discard
     @v_args(inline=False)
     def start(self, args):
         return { k.name : k for k in args if isinstance(k, Kernel) }
 
-input = open("test/gemm.ptx").read()
-
-parser = Lark(grammar)
-ast = parser.parse(input)
-ir = IRTransformer().transform(ast)
-
-k = next(iter(ir.values()))
-print("Kernel name:", k.name)
-print("Params:", k.params)
-print("Regs:", k.regs)
-print("Labels:", k.labels)
-print("Ops:", [op.opcode for op in k.instructions])
+def ptx_to_ir(src: str):
+    return IRTransformer().transform(Lark(grammar).parse(src))
