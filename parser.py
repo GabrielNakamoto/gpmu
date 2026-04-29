@@ -1,4 +1,5 @@
 from lark import Discard, Lark, Transformer, v_args
+import re
 from typing import Optional
 from dataclasses import dataclass
 
@@ -52,7 +53,7 @@ class Instruction:
 @dataclass
 class Kernel:
     name: str
-    params: list[str]
+    params: list[tuple[str, str, int]]
     regs: list[tuple]
     instructions: list[Instruction]
 
@@ -89,19 +90,29 @@ class IRTransformer(Transformer):
 
     @v_args(inline=False)
     def kernel(self, c):
-        name, params, *raw = c
+        name, raw_params, *raw = c
         regs = [b for b in raw if isinstance(b, tuple) and len(b) > 0 and b[0] != "label"]
         mixed = [b for b in raw if b not in regs]
+        instructions, labels, params = [], {}, []
 
-        instructions, labels = [], {}
+        def nbytes(fmt): return int(re.search(r'\d+', fmt).group()) // 8
+        offset = 0
+        for fmt, name in raw_params:
+            params.append((name, fmt, offset))
+            offset += nbytes(fmt)
+        param_map = { name : offset for name, _, offset in params}
+        param_names = [x[0] for x in params]
+
         for item in mixed:
             if isinstance(item, tuple) and len(item) == 0: continue
             if isinstance(item, tuple) and item[0] == "label": labels[item[1]]=len(instructions)
             elif isinstance(item, Instruction): instructions.append(item)
+
         # resolve label operands
         for op in instructions:
             for i, opr in enumerate(op.operands):
                 if opr[0] == "label": op.operands[i] = ("pc", labels[opr[1]])
+                elif opr[0] == "addr"  and opr[1] in param_names: op.operands[i] = ("param", param_map[opr[1]])
         return Kernel(name, params, regs, instructions)
 
     @v_args(inline=False)
